@@ -12,8 +12,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
-from segment_anything import sam_model_registry
+
+import sys
+sys.path.append('/home/zijianwu/projects/def-timsbc/zijianwu/codes/MedSAM/')
+from segment_anything.build_sam import sam_model_registry
+
 import cv2
+import matplotlib
+matplotlib.use('pdf')
 from matplotlib import pyplot as plt
 import argparse
 
@@ -23,6 +29,13 @@ parser.add_argument(
     '--tr_npy_path',
     type=str,
     help="Path to the data root directory.",
+    required=True
+)
+parser.add_argument(
+    '-v',
+    '--val_npy_path',
+    type=str,
+    help="Path to the validation data root directory.",
     required=True
 )
 parser.add_argument(
@@ -87,6 +100,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 data_root = args.tr_npy_path
+val_data_root = args.val_npy_path
 work_dir = args.work_dir
 num_epochs = args.max_epochs
 batch_size = args.batch_size
@@ -94,7 +108,7 @@ num_workers = args.num_workers
 medsam_checkpoint = args.medsam_checkpoint
 data_aug = not args.disable_aug
 seed = args.seed
-device = "cuda:0"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #"cuda:0"
 makedirs(work_dir, exist_ok=True)
 
 torch.cuda.empty_cache()
@@ -124,7 +138,7 @@ class NpyDataset(Dataset):
         img_1024 = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
         # convert the shape to (3, H, W)
         img_1024 = np.transpose(img_1024, (2, 0, 1)) # (3, 256, 256)
-        assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
+        # assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
         gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1,4,5...], (256,256)
         label_ids = np.unique(gt)[1:]
         try:
@@ -202,30 +216,35 @@ class MedSAM(nn.Module):
 
         return low_res_masks
 
-sam_model = sam_model_registry["vit_b"](checkpoint=medsam_checkpoint)
+sam_model = sam_model_registry["vit_h"](checkpoint=medsam_checkpoint)
 medsam_model = MedSAM(
     image_encoder = sam_model.image_encoder,
     mask_decoder = sam_model.mask_decoder,
     prompt_encoder = sam_model.prompt_encoder,
     freeze_image_encoder = True
 )
+medsam_model = nn.DataParallel(medsam_model, device_ids=[0,1,2,3])
 medsam_model = medsam_model.to(device)
 medsam_model.train()
 print(f"MedSAM size: {sum(p.numel() for p in medsam_model.parameters())}")
 
 optimizer = optim.AdamW(
-    medsam_model.mask_decoder.parameters(),
+    medsam_model.module.mask_decoder.parameters(),
     lr=args.lr,
     betas=(0.9, 0.999),
     eps=1e-08,
     weight_decay=args.weight_decay
 )
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=(num_epochs/5))
 
 seg_loss = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='mean')
 ce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
 train_dataset = NpyDataset(data_root=data_root, data_aug=data_aug)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+
+val_dataset = NpyDataset(data_root=val_data_root, data_aug=data_aug)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
 
 resume = args.resume
 if resume:
@@ -242,10 +261,13 @@ torch.cuda.empty_cache()
 
 epoch_time = []
 losses = []
+val_losses = []
+lr_list = []
 for epoch in range(start_epoch, num_epochs):
     epoch_loss = [1e10 for _ in range(len(train_loader))]
     epoch_start_time = time()
     pbar = tqdm(train_loader)
+    medsam_model.train()
     for step, batch in enumerate(pbar):
         image = batch["image"]
         gt2D = batch["gt2D"]
@@ -262,13 +284,11 @@ for epoch in range(start_epoch, num_epochs):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
+        pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, training loss: {loss.item():.4f}")
 
-    epoch_end_time = time()
-    epoch_time.append(epoch_end_time - epoch_start_time)
     epoch_loss_reduced = sum(epoch_loss) / len(epoch_loss)
     losses.append(epoch_loss_reduced)
-    model_weights = medsam_model.state_dict()
+    model_weights = medsam_model.module.state_dict()
     checkpoint = {
         "model": model_weights,
         "epoch": epoch,
@@ -276,23 +296,67 @@ for epoch in range(start_epoch, num_epochs):
         "loss": epoch_loss_reduced,
         "best_loss": best_loss
     }
-    if epoch_loss_reduced < best_loss:
-        print(f"New best loss: {best_loss:.4f} -> {epoch_loss_reduced:.4f}")
-        best_loss = epoch_loss_reduced
-        checkpoint["best_loss"] = best_loss
-        torch.save(checkpoint, join(work_dir, "medsam_point_prompt_best.pth"))
 
     torch.save(checkpoint, join(work_dir, "medsam_point_prompt_latest.pth"))
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    # validation
+    val_epoch_loss = [1e10 for _ in range(len(val_loader))]
+    val_pbar = tqdm(val_loader)
+    medsam_model.eval()
+    with torch.no_grad():
+        for step, batch in enumerate(val_pbar):
+            image = batch["image"]
+            gt2D = batch["gt2D"]
+            coords_torch = batch["coords"] # (B, 2)
+            labels_torch = torch.ones(coords_torch.shape[0]).long() # (B,)
+            labels_torch = labels_torch.unsqueeze(1) # (B, 1)
+            image, gt2D = image.to(device), gt2D.to(device)
+            coords_torch, labels_torch = coords_torch.to(device), labels_torch.to(device)
+            point_prompt = (coords_torch, labels_torch)
+            medsam_lite_pred = medsam_model(image, point_prompt)
+            loss = seg_loss(medsam_lite_pred, gt2D) + ce_loss(medsam_lite_pred, gt2D.float())
+            val_epoch_loss[step] = loss.item()
+            val_pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, validation loss: {loss.item():.4f}")
+
+    val_epoch_loss_reduced = sum(val_epoch_loss) / len(val_epoch_loss)
+    val_losses.append(val_epoch_loss_reduced)
+
+    if val_epoch_loss_reduced < best_loss:
+        print(f"New best validation loss: {best_loss:.4f} -> {val_epoch_loss_reduced:.4f}")
+        best_loss = val_epoch_loss_reduced
+        checkpoint["best_loss"] = best_loss
+        torch.save(checkpoint, join(work_dir, "medsam_point_prompt_best.pth"))
+
+
+    epoch_end_time = time()
+    epoch_time.append(epoch_end_time - epoch_start_time)
+
+    scheduler.step()
+    lr_list.append(scheduler.get_lr()[0])
+
+    fig, [[ax1, ax2], [ax3, ax4]] = plt.subplots(2, 2, figsize=(10, 10))
+    
     ax1.plot(losses)
-    ax1.set_title("Dice + Cross Entropy Loss")
+    ax1.set_title("TRaining: Dice + Cross Entropy Loss")
     ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax2.plot(epoch_time)
-    ax2.set_title("Epoch Running Time")
+    ax1.set_ylabel("Training Loss")
+    
+    ax2.plot(val_losses)
+    ax2.set_title("Validation: Dice + Cross Entropy Loss")
     ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Time (s)")
+    ax2.set_ylabel("Validation Loss")
+
+    ax3.plot(epoch_time)
+    ax3.set_title("Epoch Running Time")
+    ax3.set_xlabel("Epoch")
+    ax3.set_ylabel("Time (s)")
+
+    ax4.plot(lr_list)
+    ax4.set_title("Learning Rate Decay")
+    ax4.set_xlabel("Epoch")
+    ax4.set_ylabel("Learning Rate")
+    
     fig.savefig(join(work_dir, "medsam_point_prompt_loss_time.png"))
 
     epoch_loss_reduced = 1e10
+    val_epoch_loss_reduced = 1e10
