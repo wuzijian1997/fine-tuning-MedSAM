@@ -235,7 +235,7 @@ optimizer = optim.AdamW(
     eps=1e-08,
     weight_decay=args.weight_decay
 )
-scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=(num_epochs/5))
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=num_epochs)
 
 seg_loss = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='mean')
 ce_loss = nn.BCEWithLogitsLoss(reduction="mean")
