@@ -136,16 +136,23 @@ class NpyDataset(Dataset):
         img_name = os.path.basename(self.gt_path_files[index])
         assert img_name == os.path.basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
         img_1024 = np.load(join(self.img_path, img_name), 'r', allow_pickle=True) # (H, W, 3)
+        
         # convert the shape to (3, H, W)
-        img_1024 = np.transpose(img_1024, (2, 0, 1)) # (3, 256, 256)
-        # assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
-        gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1,4,5...], (256,256)
-        label_ids = np.unique(gt)[1:]
+        img_1024 = np.transpose(img_1024, (2, 0, 1)) # (3, 1024, 1024)
+        assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
+        
+        gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1, ..., up to 4], (1024, 1024)
+        assert gt.shape == (1024, 1024)
+        gt2D = gt.copy()
+        gt2D[gt2D!=0] = 1 # instance mask (gt) -> binary mask (gt2D)
+
+        label_ids = np.unique(gt)[1:].tolist()
         try:
             gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
         except:
             print(img_name, 'label_ids.tolist()', label_ids.tolist())
             gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
+
         # add data augmentation: random fliplr and random flipud
         if self.data_aug:
             if random.random() > 0.5:
@@ -155,12 +162,36 @@ class NpyDataset(Dataset):
                 img_1024 = np.ascontiguousarray(np.flip(img_1024, axis=-2))
                 gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
         gt2D = np.uint8(gt2D > 0)
-        y_indices, x_indices = np.where(gt2D > 0)
-        x_point = np.random.choice(x_indices)
-        y_point = np.random.choice(y_indices)
-        coords = np.array([x_point, y_point])
 
-        ## Randomly sample a point from the gt at scale 1024
+        # randomly choose prompt at scale 1024
+        if img_name.split[0] == 'endovis17' or img_name.split[0] == 'robustmis19': # instance level label, 1 point prompt for each instance
+            coords = []
+            for label_id in label_ids:
+                y_indices, x_indices = np.where(gt == label_id)
+                x_point = np.random.choice(x_indices)
+                y_point = np.random.choice(y_indices)
+                assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
+                coords.append([x_point, y_point])
+            np.array(coords) # coords (#label_ids, 2)    
+        elif img_name.split[0] == 'cholecseg8k': # semantic level label, random number of point prompt for each class
+            coords = []
+            for label_id in label_ids:
+                y_indices, x_indices = np.where(gt == label_id)
+                point_num = np.random.choice(list(range(1, 10)))
+                x_point = np.random.choice(x_indices, point_num)
+                y_point = np.random.choice(y_indices, point_num)
+                for i in range(point_num):
+                    assert gt2D[x_point[i], y_point[i]] == 1, 'prompt point should be in the mask'
+                    coords.append([x_point[i], y_point[i]])
+            np.array(coords) # coords (#label_ids, 2)
+        elif img_name.split[0] == 'RoboTool': # binary level label, random number of point prompt
+            y_indices, x_indices = np.where(gt2D > 0)
+            point_num = np.random.choice(list(range(1, 10)))
+            x_point = np.random.choice(x_indices, point_num)
+            y_point = np.random.choice(y_indices, point_num)
+            coords = np.array([[x_point[i], y_point[i]] for i in range(point_num)])
+
+        ## resize gt2D to (256, 256)
         gt2D_256 = cv2.resize(
             gt2D,
             (256, 256),
@@ -169,7 +200,7 @@ class NpyDataset(Dataset):
         return {
             "image": torch.tensor(img_1024).float(),
             "gt2D": torch.tensor(gt2D_256[None, :,:]).long(),
-            "coords": torch.tensor(coords[None, ...]).float(),
+            "coords": torch.tensor(coords[...]).float(),
             "image_name": img_name
         }
 
@@ -271,10 +302,9 @@ for epoch in range(start_epoch, num_epochs):
     for step, batch in enumerate(pbar):
         image = batch["image"]
         gt2D = batch["gt2D"]
-        coords_torch = batch["coords"] # (B, 2)
+        coords_torch = batch["coords"] # (B, N, 2)
         optimizer.zero_grad()
-        labels_torch = torch.ones(coords_torch.shape[0]).long() # (B,)
-        labels_torch = labels_torch.unsqueeze(1) # (B, 1)
+        labels_torch = torch.ones(coords_torch.shape[0], coords_torch.shape[1]).long() # (B, N)
         image, gt2D = image.to(device), gt2D.to(device)
         coords_torch, labels_torch = coords_torch.to(device), labels_torch.to(device)
         point_prompt = (coords_torch, labels_torch)
