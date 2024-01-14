@@ -148,7 +148,7 @@ class NpyDataset(Dataset):
 
         label_ids = np.unique(gt)[1:].tolist()
         try:
-            gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
+            gt2D = np.uint8(gt == random.choice(label_ids)) # only one label, (256, 256)
         except:
             print(img_name, 'label_ids.tolist()', label_ids.tolist())
             gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
@@ -164,7 +164,7 @@ class NpyDataset(Dataset):
         gt2D = np.uint8(gt2D > 0)
 
         # randomly choose prompt at scale 1024
-        if img_name.split[0] == 'endovis17' or img_name.split[0] == 'robustmis19': # instance level label, 1 point prompt for each instance
+        if img_name.split('-')[0] == 'endovis17' or img_name.split('-')[0] == 'robustmis19': # instance level label, 1 point prompt for each instance
             coords = []
             for label_id in label_ids:
                 y_indices, x_indices = np.where(gt == label_id)
@@ -173,7 +173,7 @@ class NpyDataset(Dataset):
                 assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
                 coords.append([x_point, y_point])
             np.array(coords) # coords (#label_ids, 2)    
-        elif img_name.split[0] == 'cholecseg8k': # semantic level label, random number of point prompt for each class
+        elif img_name.split('-')[0] == 'cholecseg8k': # semantic level label, random number of point prompt for each class
             coords = []
             for label_id in label_ids:
                 y_indices, x_indices = np.where(gt == label_id)
@@ -184,7 +184,7 @@ class NpyDataset(Dataset):
                     assert gt2D[x_point[i], y_point[i]] == 1, 'prompt point should be in the mask'
                     coords.append([x_point[i], y_point[i]])
             np.array(coords) # coords (#label_ids, 2)
-        elif img_name.split[0] == 'RoboTool': # binary level label, random number of point prompt
+        elif img_name.split('-')[0] == 'RoboTool': # binary level label, random number of point prompt
             y_indices, x_indices = np.where(gt2D > 0)
             point_num = np.random.choice(list(range(1, 10)))
             x_point = np.random.choice(x_indices, point_num)
