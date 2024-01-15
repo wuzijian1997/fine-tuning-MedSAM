@@ -142,9 +142,11 @@ class NpyDataset(Dataset):
         assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
         
         gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1, ..., up to 4], (1024, 1024)
+        # print('gt2D',np.unique(gt))
         assert gt.shape == (1024, 1024)
         gt2D = gt.copy()
-        gt2D[gt2D!=0] = 1 # instance mask (gt) -> binary mask (gt2D)
+        gt2D[gt2D!=0] = 1 # instance mask (gt) -> binary mask (gt2D)\
+        # print('gt2D',np.unique(gt2D))
 
         label_ids = np.unique(gt)[1:].tolist()
         try:
@@ -161,18 +163,28 @@ class NpyDataset(Dataset):
             if random.random() > 0.5:
                 img_1024 = np.ascontiguousarray(np.flip(img_1024, axis=-2))
                 gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
+            print('------------------------Data Augmented!!----------------------')
+
         gt2D = np.uint8(gt2D > 0)
 
         # randomly choose prompt at scale 1024
+        # in a batch, the number of points should be same (TODO)
         if img_name.split('-')[0] == 'endovis17' or img_name.split('-')[0] == 'robustmis19': # instance level label, 1 point prompt for each instance
             coords = []
             for label_id in label_ids:
-                y_indices, x_indices = np.where(gt == label_id)
+                x_indices, y_indices = np.where(gt == label_id)
                 x_point = np.random.choice(x_indices)
                 y_point = np.random.choice(y_indices)
-                assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
+                print(gt2D[x_point, y_point])
+                # assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
                 coords.append([x_point, y_point])
-            np.array(coords) # coords (#label_ids, 2)    
+            if len(label_ids) != 4:
+                for i in range(4 - len(label_ids)):
+                    x_indices, y_indices = np.where(gt > 0)
+                    x_point = np.random.choice(x_indices)
+                    y_point = np.random.choice(y_indices)
+                    coords.append([x_point, y_point])
+            coords = np.array(coords) # coords (4, 2)    
         elif img_name.split('-')[0] == 'cholecseg8k': # semantic level label, random number of point prompt for each class
             coords = []
             for label_id in label_ids:
@@ -183,7 +195,7 @@ class NpyDataset(Dataset):
                 for i in range(point_num):
                     assert gt2D[x_point[i], y_point[i]] == 1, 'prompt point should be in the mask'
                     coords.append([x_point[i], y_point[i]])
-            np.array(coords) # coords (#label_ids, 2)
+            coords = np.array(coords) # coords (#label_ids, 2)
         elif img_name.split('-')[0] == 'RoboTool': # binary level label, random number of point prompt
             y_indices, x_indices = np.where(gt2D > 0)
             point_num = np.random.choice(list(range(1, 10)))
