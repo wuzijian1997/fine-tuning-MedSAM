@@ -139,9 +139,10 @@ class NpyDataset(Dataset):
         
         # convert the shape to (3, H, W)
         img_1024 = np.transpose(img_1024, (2, 0, 1)) # (3, 1024, 1024)
-        assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
+        # assert np.max(img_1024)<=1.0 and np.min(img_1024)>=0.0, 'image should be normalized to [0, 1]'
         
         gt = np.load(self.gt_path_files[index], 'r', allow_pickle=True) # multiple labels [0, 1, ..., up to 4], (1024, 1024)
+        gt = np.uint8(gt)
         # print('gt2D',np.unique(gt))
         assert gt.shape == (1024, 1024)
         gt2D = gt.copy()
@@ -149,42 +150,49 @@ class NpyDataset(Dataset):
         # print('gt2D',np.unique(gt2D))
 
         label_ids = np.unique(gt)[1:].tolist()
-        try:
-            gt2D = np.uint8(gt == random.choice(label_ids)) # only one label, (256, 256)
-        except:
-            print(img_name, 'label_ids.tolist()', label_ids.tolist())
-            gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
+        # print(img_name, 'label_ids: ', label_ids)
+
+        # try:
+        #     gt2D = np.uint8(gt == random.choice(label_ids)) # only one label, (256, 256)
+        # except:
+        #     gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
 
         # add data augmentation: random fliplr and random flipud
         if self.data_aug:
             if random.random() > 0.5:
                 img_1024 = np.ascontiguousarray(np.flip(img_1024, axis=-1))
                 gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-1))
+                gt = np.ascontiguousarray(np.flip(gt, axis=-1))
             if random.random() > 0.5:
                 img_1024 = np.ascontiguousarray(np.flip(img_1024, axis=-2))
                 gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
-            print('------------------------Data Augmented!!----------------------')
+                gt = np.ascontiguousarray(np.flip(gt, axis=-2))
 
-        gt2D = np.uint8(gt2D > 0)
+        # gt2D = np.uint8(gt2D > 0)
 
         # randomly choose prompt at scale 1024
-        # in a batch, the number of points should be same (TODO)
+        # In a batch, the number of points should be same...
         if img_name.split('-')[0] == 'endovis17' or img_name.split('-')[0] == 'robustmis19': # instance level label, 1 point prompt for each instance
             coords = []
             for label_id in label_ids:
                 x_indices, y_indices = np.where(gt == label_id)
-                x_point = np.random.choice(x_indices)
-                y_point = np.random.choice(y_indices)
-                print(gt2D[x_point, y_point])
-                # assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
+                candidate_points_num = x_indices.shape[0]
+                assert x_indices.shape[0] == y_indices.shape[0], 'length of x_indices and y_indices should be same'
+                point_idx = np.random.choice(range(candidate_points_num))
+                x_point, y_point = x_indices[point_idx], y_indices[point_idx]
+                assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
                 coords.append([x_point, y_point])
             if len(label_ids) != 4:
                 for i in range(4 - len(label_ids)):
                     x_indices, y_indices = np.where(gt > 0)
-                    x_point = np.random.choice(x_indices)
-                    y_point = np.random.choice(y_indices)
+                    candidate_points_num = x_indices.shape[0]
+                    assert x_indices.shape[0] == y_indices.shape[0], 'length of x_indices and y_indices should be same'
+                    point_idx = np.random.choice(range(candidate_points_num))
+                    x_point, y_point = x_indices[point_idx], y_indices[point_idx]
+                    assert gt2D[x_point, y_point] == 1, 'prompt point should be in the mask'
                     coords.append([x_point, y_point])
-            coords = np.array(coords) # coords (4, 2)    
+            coords = np.array(coords) # coords (4, 2)   
+            assert coords.shape == (4, 2), 'prompt size should be (4, 2)'
         elif img_name.split('-')[0] == 'cholecseg8k': # semantic level label, random number of point prompt for each class
             coords = []
             for label_id in label_ids:
@@ -349,9 +357,8 @@ for epoch in range(start_epoch, num_epochs):
         for step, batch in enumerate(val_pbar):
             image = batch["image"]
             gt2D = batch["gt2D"]
-            coords_torch = batch["coords"] # (B, 2)
-            labels_torch = torch.ones(coords_torch.shape[0]).long() # (B,)
-            labels_torch = labels_torch.unsqueeze(1) # (B, 1)
+            coords_torch = batch["coords"] # (B, N, 2)
+            labels_torch = torch.ones(coords_torch.shape[0], coords_torch.shape[1]).long() # (B, N)
             image, gt2D = image.to(device), gt2D.to(device)
             coords_torch, labels_torch = coords_torch.to(device), labels_torch.to(device)
             point_prompt = (coords_torch, labels_torch)
