@@ -15,7 +15,8 @@ from datetime import datetime
 
 import sys
 sys.path.append('/home/zijianwu/projects/def-timsbc/zijianwu/codes/MedSAM/')
-from segment_anything.build_sam import sam_model_registry
+# from segment_anything.build_sam import sam_model_registry
+from mobile_sam.build_sam import sam_model_registry
 
 import cv2
 import matplotlib
@@ -260,14 +261,15 @@ class MedSAM(nn.Module):
         low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embedding, # (B, 256, 64, 64)
             image_pe=self.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-            sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
+            sparse_prompt_embeddings=sparse_embeddings, # (B, num_points+1, 256)
             dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
             multimask_output=False,
           ) # (B, 1, 256, 256)
 
         return low_res_masks
 
-sam_model = sam_model_registry["vit_h"](checkpoint=medsam_checkpoint)
+# sam_model = sam_model_registry["vit_h"](checkpoint=medsam_checkpoint)
+sam_model = sam_model_registry["vit_t"](checkpoint=medsam_checkpoint)
 medsam_model = MedSAM(
     image_encoder = sam_model.image_encoder,
     mask_decoder = sam_model.mask_decoder,
