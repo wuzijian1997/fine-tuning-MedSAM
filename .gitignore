@@ -2,6 +2,7 @@
 # Project specific
 *.DS_Store
 *.pth
+*.pt
 *.nii.gz
 *.nii
 *.npy
